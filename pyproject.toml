@@ -1,0 +1,35 @@
+[build-system]
+requires = ["meson-python", "VapourSynth>=74"]
+build-backend = "mesonpy"
+
+[project]
+name = "vapoursynth-descratch"
+description = "Scratch removing filter for VapourSynth"
+readme = "readme.rst"
+requires-python = ">=3.12"
+license = "GPL-2.0"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Fredrik Mellbin", email = "fredrik.mellbin@gmail.com"},    
+]
+keywords = ["video", "borders"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Plugins",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX",
+    "Operating System :: Unix",
+    "Programming Language :: C++",
+    "Topic :: Multimedia :: Video",
+]
+dependencies = ["VapourSynth"]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/dubhatervapoursynth/vapoursynth-fillborders.git"
+Issues = "https://github.com/dubhatervapoursynth/vapoursynth-fillborders/issues"
+
+[tool.meson-python.wheel]
+exclude = ["*/*.dll.a", "*/*.lib"]

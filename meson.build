@@ -1,54 +1,27 @@
 project('FillBorders', 'cpp',
-        version: '2',
-        default_options: ['cpp_std=c++11', 'buildtype=release'],
-        meson_version: '>=0.46')
+    default_options: ['buildtype=release', 'warning_level=2', 'b_lto=true', 'b_ndebug=if-release', 'cpp_std=c++17'],
+    license: 'GPL-2.0',
+    license_files: 'LICENSE',
+    meson_version: '>=1.2.3',
+    version: '3.0',
+)
 
+incdir = include_directories(
+    run_command(
+        find_program('python', 'python3'),
+        '-c',
+        'import vapoursynth as vs; print(vs.get_include())',
+        check: true,
+    ).stdout().strip(),
+)
 
-warnings = [
-  '-Wall',
-  '-Wextra',
-  '-Wshadow',
-]
-
-cflags = [
-  warnings,
-]
-
-ldflags = [
-]
-
-
-host_cpu_family = host_machine.cpu_family()
-
-if host_cpu_family.startswith('x86')
-  cflags += ['-mfpmath=sse', '-msse2']
-endif
-
-
-host_system = host_machine.system()
-
-if host_system == 'windows' or host_system == 'cygwin'
-  if host_cpu_family == 'x86'
-    cflags += '-mstackrealign'
-    ldflags += '-Wl,--kill-at'
-  endif
-endif
-
-
-cxx = meson.get_compiler('cpp')
-
-
-sources = [
-  'src/fillborders.cpp',
-]
-
-deps = [
-  dependency('vapoursynth').partial_dependency(includes: true, compile_args: true),
-]
+py = import('python').find_installation(pure: false)
 
 shared_module('fillborders',
-              sources,
-              dependencies: deps,
-              link_args: ldflags,
-              cpp_args: cflags,
-              install: true)
+    files('src/fillborders.cpp'),
+    gnu_symbol_visibility: 'hidden',
+    include_directories: incdir,
+    install: true,
+    install_dir: py.get_install_dir() / 'vapoursynth/plugins',
+    name_prefix: '',
+)

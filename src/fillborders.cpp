@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <VapourSynth.h>
-#include <VSHelper.h>
+#include <VapourSynth4.h>
+#include <VSHelper4.h>
 
 
 enum FillMode {
@@ -22,7 +22,7 @@ enum InterlacedValues {
 
 
 typedef struct {
-   VSNodeRef *node;
+   VSNode *node;
    const VSVideoInfo *vi;
 
    int left;
@@ -32,17 +32,6 @@ typedef struct {
    int mode;
    int interlaced;
 } FillBordersData;
-
-
-static void VS_CC fillBordersInit(VSMap *in, VSMap *out, void **instanceData, VSNode *node, VSCore *core, const VSAPI *vsapi) {
-    (void)in;
-    (void)out;
-    (void)core;
-
-   FillBordersData *d = (FillBordersData *) * instanceData;
-   vsapi->setVideoInfo(d->vi, 1, node);
-}
-
 
 template <typename PixelType>
 static inline void vs_memset16(void *ptr, int value, size_t num) {
@@ -56,7 +45,7 @@ static inline void vs_memset16(void *ptr, int value, size_t num) {
 }
 
 template <typename PixelType>
-static void fillBorders(uint8_t *dstp8, int width, int height, int stride, int left, int right, int top, int bottom, int mode, int interlaced) {
+static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, int left, int right, int top, int bottom, int mode, int interlaced) {
    int x, y;
    PixelType *dstp = (PixelType *)dstp8;
    stride /= sizeof(PixelType);
@@ -340,16 +329,16 @@ static void fillBorders(uint8_t *dstp8, int width, int height, int stride, int l
 }
 
 
-static const VSFrameRef *VS_CC fillBordersGetFrame(int n, int activationReason, void **instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
+static const VSFrame *VS_CC fillBordersGetFrame(int n, int activationReason, void *instanceData, void **frameData, VSFrameContext *frameCtx, VSCore *core, const VSAPI *vsapi) {
     (void)frameData;
 
-   FillBordersData *d = (FillBordersData *) * instanceData;
+   FillBordersData *d = (FillBordersData *) instanceData;
 
    if (activationReason == arInitial) {
       vsapi->requestFrameFilter(n, d->node, frameCtx);
    } else if (activationReason == arAllFramesReady) {
-      const VSFrameRef *src = vsapi->getFrameFilter(n, d->node, frameCtx);
-      VSFrameRef *dst = vsapi->copyFrame(src, core);
+      const VSFrame *src = vsapi->getFrameFilter(n, d->node, frameCtx);
+      VSFrame *dst = vsapi->copyFrame(src, core);
       int plane;
       vsapi->freeFrame(src);
 
@@ -366,28 +355,28 @@ static const VSFrameRef *VS_CC fillBordersGetFrame(int n, int activationReason, 
               TopFieldFirst = 2
           };
 
-          const VSMap *props = vsapi->getFramePropsRO(dst);
+          const VSMap *props = vsapi->getFramePropertiesRO(dst);
 
           int err;
-          int64_t field_based = vsapi->propGetInt(props, "_FieldBased", 0, &err);
+          int64_t field_based = vsapi->mapGetInt(props, "_FieldBased", 0, &err);
           if (err || field_based == Progressive)
               interlaced_processing = 0;
           else
               interlaced_processing = 1;
       }
 
-      int left[2] = { d->left, d->left >> d->vi->format->subSamplingW };
-      int top[2] = { d->top, d->top >> d->vi->format->subSamplingH };
-      int right[2] = { d->right, d->right >> d->vi->format->subSamplingW };
-      int bottom[2] = { d->bottom, d->bottom >> d->vi->format->subSamplingH };
+      int left[2] = { d->left, d->left >> d->vi->format.subSamplingW };
+      int top[2] = { d->top, d->top >> d->vi->format.subSamplingH };
+      int right[2] = { d->right, d->right >> d->vi->format.subSamplingW };
+      int bottom[2] = { d->bottom, d->bottom >> d->vi->format.subSamplingH };
 
-      for (plane = 0; plane < d->vi->format->numPlanes; plane++) {
+      for (plane = 0; plane < d->vi->format.numPlanes; plane++) {
          uint8_t *dstp = vsapi->getWritePtr(dst, plane);
          int width = vsapi->getFrameWidth(dst, plane);
          int height = vsapi->getFrameHeight(dst, plane);
-         int stride = vsapi->getStride(dst, plane);
+         intptr_t stride = vsapi->getStride(dst, plane);
 
-         (d->vi->format->bytesPerSample == 1 ? fillBorders<uint8_t>
+         (d->vi->format.bytesPerSample == 1 ? fillBorders<uint8_t>
                                              : fillBorders<uint16_t>)(dstp, width, height, stride, left[!!plane], right[!!plane], top[!!plane], bottom[!!plane], d->mode, interlaced_processing);
       }
 
@@ -415,12 +404,12 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, void *userData,
    FillBordersData *data;
    int err;
 
-   d.left = vsapi->propGetInt(in, "left", 0, &err);
-   d.right = vsapi->propGetInt(in, "right", 0, &err);
-   d.top = vsapi->propGetInt(in, "top", 0, &err);
-   d.bottom = vsapi->propGetInt(in, "bottom", 0, &err);
+   d.left = vsapi->mapGetIntSaturated(in, "left", 0, &err);
+   d.right = vsapi->mapGetIntSaturated(in, "right", 0, &err);
+   d.top = vsapi->mapGetIntSaturated(in, "top", 0, &err);
+   d.bottom = vsapi->mapGetIntSaturated(in, "bottom", 0, &err);
 
-   const char *mode = vsapi->propGetData(in, "mode", 0, &err);
+   const char *mode = vsapi->mapGetData(in, "mode", 0, &err);
    if (err) {
       d.mode = ModeRepeat;
    } else {
@@ -433,48 +422,47 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, void *userData,
       } else if (strcmp(mode, "fixborders") == 0) {
          d.mode = ModeFixBorders;
       } else {
-         vsapi->setError(out, "FillBorders: Invalid mode. Valid values are 'fillmargins', 'mirror', 'repeat', and 'fixborders'.");
+         vsapi->mapSetError(out, "FillBorders: Invalid mode. Valid values are 'fillmargins', 'mirror', 'repeat', and 'fixborders'.");
          return;
       }
    }
 
-   d.interlaced = !!vsapi->propGetInt(in, "interlaced", 0, &err);
+   d.interlaced = !!vsapi->mapGetInt(in, "interlaced", 0, &err);
    if (err)
        d.interlaced = NotInterlaced;
 
 
    if (d.left < 0 || d.right < 0 || d.top < 0 || d.bottom < 0) {
-      vsapi->setError(out, "FillBorders: Can't fill a negative number of pixels.");
+      vsapi->mapSetError(out, "FillBorders: Can't fill a negative number of pixels.");
       return;
    }
 
-   d.node = vsapi->propGetNode(in, "clip", 0, 0);
+   d.node = vsapi->mapGetNode(in, "clip", 0, nullptr);
    d.vi = vsapi->getVideoInfo(d.node);
 
-   if (!isConstantFormat(d.vi) || d.vi->format->sampleType != stInteger || d.vi->format->bytesPerSample > 2) {
-      vsapi->setError(out, "FillBorders: Only constant format 8..16 bit integer input supported.");
+   if (!vsh::isConstantVideoFormat(d.vi) || d.vi->format.sampleType != stInteger || d.vi->format.bytesPerSample > 2) {
+      vsapi->mapSetError(out, "FillBorders: Only constant format 8..16 bit integer input supported.");
       vsapi->freeNode(d.node);
       return;
    }
 
    if (!d.left && !d.right && !d.top && !d.bottom) {
       // Just pass the input node through.
-      vsapi->propSetNode(out, "clip", d.node, paReplace);
-      vsapi->freeNode(d.node);
+      vsapi->mapConsumeNode(out, "clip", d.node, maReplace);
       return;
    }
 
    if (d.mode == ModeFillMargins || d.mode == ModeRepeat || d.mode == ModeFixBorders) {
       if (d.vi->width < d.left + d.right || d.vi->width <= d.left || d.vi->width <= d.right ||
           d.vi->height < d.top + d.bottom || d.vi->height <= d.top || d.vi->height <= d.bottom) {
-         vsapi->setError(out, "FillBorders: The input clip is too small or the borders are too big.");
+         vsapi->mapSetError(out, "FillBorders: The input clip is too small or the borders are too big.");
          vsapi->freeNode(d.node);
          return;
       }
    } else if (d.mode == ModeMirror) {
       if (d.vi->width < 2*d.left || d.vi->width < 2*d.right ||
           d.vi->height < 2*d.top || d.vi->height < 2*d.bottom) {
-         vsapi->setError(out, "FillBorders: The input clip is too small or the borders are too big.");
+         vsapi->mapSetError(out, "FillBorders: The input clip is too small or the borders are too big.");
          vsapi->freeNode(d.node);
          return;
       }
@@ -483,19 +471,21 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, void *userData,
    data = (FillBordersData *)malloc(sizeof(d));
    *data = d;
 
-   vsapi->createFilter(in, out, "FillBorders", fillBordersInit, fillBordersGetFrame, fillBordersFree, fmParallel, 0, data, core);
+   VSFilterDependency deps[] = { {data->node, rpStrictSpatial} };
+   vsapi->createVideoFilter(out, "FillBorders", data->vi, fillBordersGetFrame, fillBordersFree, fmParallel, deps, 1, data, core);
 }
 
 
-VS_EXTERNAL_API(void) VapourSynthPluginInit(VSConfigPlugin configFunc, VSRegisterFunction registerFunc, VSPlugin *plugin) {
-   configFunc("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VAPOURSYNTH_API_VERSION, 1, plugin);
-   registerFunc("FillBorders",
-                "clip:clip;"
+VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
+   vspapi->configPlugin("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VS_MAKE_VERSION(3, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
+   vspapi->registerFunction("FillBorders",
+                "clip:vnode;"
                 "left:int:opt;"
                 "right:int:opt;"
                 "top:int:opt;"
                 "bottom:int:opt;"
                 "mode:data:opt;"
-                "interlaced:int:opt;"
-                , fillBordersCreate, 0, plugin);
+                "interlaced:int:opt;",
+                "clip:vnode;",
+                fillBordersCreate, nullptr, plugin);
 }
