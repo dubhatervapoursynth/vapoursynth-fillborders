@@ -50,6 +50,10 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
    PixelType *dstp = (PixelType *)dstp8;
    stride /= sizeof(PixelType);
 
+   // fillmargins/fixborders copy the first pixel and the last 8 columns verbatim;
+   // clamp that count so planes narrower than 8 don't index before the row.
+   const int copyLen = width < 8 ? width : 8;
+
    if (mode == ModeFillMargins) {
       for (y = top; y < height - bottom; y++) {
          vs_memset16<PixelType>(dstp + stride*y, (dstp + stride*y)[left], left);
@@ -60,10 +64,10 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
          // copy first pixel
          // copy last eight pixels
          dstp[stride*y] = dstp[stride*(y+1 + interlaced)];
-         memcpy(dstp + stride*y + width - 8, dstp + stride*(y+1 + interlaced) + width - 8, 8 * sizeof(PixelType));
+         memcpy(dstp + stride*y + width - copyLen, dstp + stride*(y+1 + interlaced) + width - copyLen, copyLen * sizeof(PixelType));
 
          // weighted average for the rest
-         for (x = 1; x < width - 8; x++) {
+         for (x = 1; x < width - copyLen; x++) {
             PixelType prev = dstp[stride*(y+1 + interlaced) + x - 1];
             PixelType cur  = dstp[stride*(y+1 + interlaced) + x];
             PixelType next = dstp[stride*(y+1 + interlaced) + x + 1];
@@ -75,10 +79,10 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
          // copy first pixel
          // copy last eight pixels
          dstp[stride*y] = dstp[stride*(y-1 - interlaced)];
-         memcpy(dstp + stride*y + width - 8, dstp + stride*(y-1 - interlaced) + width - 8, 8 * sizeof(PixelType));
+         memcpy(dstp + stride*y + width - copyLen, dstp + stride*(y-1 - interlaced) + width - copyLen, copyLen * sizeof(PixelType));
 
          // weighted average for the rest
-         for (x = 1; x < width - 8; x++) {
+         for (x = 1; x < width - copyLen; x++) {
             PixelType prev = dstp[stride*(y-1 - interlaced) + x - 1];
             PixelType cur  = dstp[stride*(y-1 - interlaced) + x];
             PixelType next = dstp[stride*(y-1 - interlaced) + x + 1];
@@ -166,9 +170,9 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
             PixelType ref_cur  = dstp[stride*(y) +x+2];
             PixelType ref_next = dstp[stride*(y + 1 + interlaced) +x+2];
 
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next) / 9 + 0.5;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next) / 5 + 0.5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next) / 9 + 0.5;
+	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
+	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
+	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
 
 	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y - 2 - interlaced) + x+2]) / 4;
 	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y + 2 + interlaced) + x+2]) / 4;
@@ -213,9 +217,9 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
             PixelType ref_cur  = dstp[stride*(y) + x-2];
             PixelType ref_next = dstp[stride*(y + 1 + interlaced) + x-2];
 	    
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next) / 9 + 0.5;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next) / 5 + 0.5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next) / 9 + 0.5;
+	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
+	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
+	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
 
 	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y - 2 - interlaced) + x-2]) / 4;
 	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y + 2 + interlaced) + x-2]) / 4;
@@ -244,10 +248,10 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
          // copy first pixel
          // copy last eight pixels
          dstp[stride*y] = dstp[stride*(y+1 + interlaced)];
-         memcpy(dstp + stride*y + width - 8, dstp + stride*(y+1 + interlaced) + width - 8, 8 * sizeof(PixelType));
+         memcpy(dstp + stride*y + width - copyLen, dstp + stride*(y+1 + interlaced) + width - copyLen, copyLen * sizeof(PixelType));
 
          // weighted average for the rest
-         for (x = 1; x < width - 8; x++) {
+         for (x = 1; x < width - copyLen; x++) {
             PixelType prev = dstp[stride*(y+1 + interlaced) + x - 1];
             PixelType cur  = dstp[stride*(y+1 + interlaced) + x];
             PixelType next = dstp[stride*(y+1 + interlaced) + x + 1];
@@ -256,9 +260,9 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
             PixelType ref_cur  = dstp[stride*(y+2 + interlaced) + x];
             PixelType ref_next = dstp[stride*(y+2 + interlaced) + x + 1];
 
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next) / 9 + 0.5;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next) / 5 + 0.5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next) / 9 + 0.5;
+	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
+	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
+	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
 
 	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y+2 + interlaced) + x - 2]) / 4;
 	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y+2 + interlaced) + x + 2]) / 4;
@@ -287,24 +291,24 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
          // copy first pixel
          // copy last eight pixels
          dstp[stride*y] = dstp[stride*(y-1 - interlaced)];
-         memcpy(dstp + stride*y + width - 8, dstp + stride*(y-1 - interlaced) + width - 8, 8 * sizeof(PixelType));
+         memcpy(dstp + stride*y + width - copyLen, dstp + stride*(y-1 - interlaced) + width - copyLen, copyLen * sizeof(PixelType));
 
          // weighted average for the rest
-         for (x = 1; x < width - 8; x++) {
+         for (x = 1; x < width - copyLen; x++) {
             PixelType prev = dstp[stride*(y-1 - interlaced) + x - 1];
             PixelType cur  = dstp[stride*(y-1 - interlaced) + x];
             PixelType next = dstp[stride*(y-1 - interlaced) + x + 1];
 
-            PixelType ref_prev = dstp[stride*(y-2 + interlaced) + x - 1];
-            PixelType ref_cur  = dstp[stride*(y-2 + interlaced) + x];
-            PixelType ref_next = dstp[stride*(y-2 + interlaced) + x + 1];
+            PixelType ref_prev = dstp[stride*(y-2 - interlaced) + x - 1];
+            PixelType ref_cur  = dstp[stride*(y-2 - interlaced) + x];
+            PixelType ref_next = dstp[stride*(y-2 - interlaced) + x + 1];
 	    
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next) / 9 + 0.5;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next) / 5 + 0.5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next) / 9 + 0.5;
+	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
+	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
+	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
 
-	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y-2 + interlaced) + x - 2]) / 4;
-	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y-2 + interlaced) + x + 2]) / 4;
+	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y-2 - interlaced) + x - 2]) / 4;
+	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y-2 - interlaced) + x + 2]) / 4;
 
 	    PixelType diff_next = abs(ref_next - fill_cur);
 	    PixelType diff_prev = abs(ref_prev - fill_cur);
@@ -427,9 +431,14 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, void *userData,
       }
    }
 
-   d.interlaced = !!vsapi->mapGetInt(in, "interlaced", 0, &err);
+   d.interlaced = vsapi->mapGetIntSaturated(in, "interlaced", 0, &err);
    if (err)
        d.interlaced = NotInterlaced;
+
+   if (d.interlaced < InterlacedAuto || d.interlaced > Interlaced) {
+      vsapi->mapSetError(out, "FillBorders: interlaced must be -1 (auto), 0 (off), or 1 (on).");
+      return;
+   }
 
 
    if (d.left < 0 || d.right < 0 || d.top < 0 || d.bottom < 0) {
@@ -452,20 +461,40 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, void *userData,
       return;
    }
 
-   if (d.mode == ModeFillMargins || d.mode == ModeRepeat || d.mode == ModeFixBorders) {
-      if (d.vi->width < d.left + d.right || d.vi->width <= d.left || d.vi->width <= d.right ||
-          d.vi->height < d.top + d.bottom || d.vi->height <= d.top || d.vi->height <= d.bottom) {
-         vsapi->mapSetError(out, "FillBorders: The input clip is too small or the borders are too big.");
-         vsapi->freeNode(d.node);
-         return;
-      }
+   // Interlaced processing reads one row further than progressive. For interlaced=-1
+   // (auto) the decision is per-frame, so validate for the worst case (il = 1).
+   const int il = (d.interlaced != NotInterlaced) ? 1 : 0;
+
+   bool too_small = false;
+   if (d.mode == ModeFillMargins || d.mode == ModeRepeat) {
+      // horizontal: fill reads the first/last kept column; vertical: reads one row
+      // (top + il / bottom + il) into the interior.
+      too_small = d.vi->width  < d.left + d.right || d.vi->width  <= d.left || d.vi->width  <= d.right ||
+                  d.vi->height < d.top + d.bottom || d.vi->height <= d.top + il || d.vi->height <= d.bottom + il;
+   } else if (d.mode == ModeFixBorders) {
+      // side columns read 2 pixels inward and, when present, copy 3 rows at top and
+      // bottom; the top/bottom fill reads 2 (+il) / 1 (+il) rows into the interior.
+      bool cols = d.left > 0 || d.right > 0;
+      too_small = d.vi->width  < d.left + d.right ||
+                  (d.left  > 0 && d.vi->width  < d.left  + 2) ||
+                  (d.right > 0 && d.vi->width  < d.right + 2) ||
+                  d.vi->height < d.top + d.bottom ||
+                  (cols && (d.vi->height < d.top + 3 || d.vi->height < d.bottom + 3)) ||
+                  (d.top    > 0 && d.vi->height < d.top    + 2 + il) ||
+                  (d.bottom > 0 && d.vi->height < d.bottom + 2 + il);
    } else if (d.mode == ModeMirror) {
-      if (d.vi->width < 2*d.left || d.vi->width < 2*d.right ||
-          d.vi->height < 2*d.top || d.vi->height < 2*d.bottom) {
-         vsapi->mapSetError(out, "FillBorders: The input clip is too small or the borders are too big.");
-         vsapi->freeNode(d.node);
-         return;
-      }
+      // reflects up to 2*border-1 pixels; interlaced reflection of an odd border
+      // reaches one row further (row 2*border), needing height >= 2*border + 1.
+      too_small = d.vi->width < 2*d.left || d.vi->width < 2*d.right ||
+                  d.vi->height < 2*d.top || d.vi->height < 2*d.bottom ||
+                  (il && (d.top    % 2) && d.vi->height < 2*d.top    + 1) ||
+                  (il && (d.bottom % 2) && d.vi->height < 2*d.bottom + 1);
+   }
+
+   if (too_small) {
+      vsapi->mapSetError(out, "FillBorders: The input clip is too small or the borders are too big.");
+      vsapi->freeNode(d.node);
+      return;
    }
 
    data = (FillBordersData *)malloc(sizeof(d));
