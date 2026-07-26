@@ -3,7 +3,7 @@ project('FillBorders', 'cpp',
     license: 'WTFPL',
     license_files: 'LICENSE',
     meson_version: '>=1.2.3',
-    version: '3.0',
+    version: '4.0',
 )
 
 incdir = include_directories(

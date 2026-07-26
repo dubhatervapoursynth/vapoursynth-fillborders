@@ -537,7 +537,7 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, [[maybe_unused]
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
-   vspapi->configPlugin("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VS_MAKE_VERSION(3, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
+   vspapi->configPlugin("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VS_MAKE_VERSION(4, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
    vspapi->registerFunction("FillBorders",
                 "clip:vnode;"
                 "left:int:opt;"
