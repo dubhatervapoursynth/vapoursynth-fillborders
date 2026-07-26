@@ -7,7 +7,7 @@ name = "vapoursynth-fillborders"
 description = "Border extension filter for VapourSynth"
 readme = "readme.rst"
 requires-python = ">=3.12"
-license = "GPL-2.0"
+license = "WTFPL"
 license-files = ["LICENSE"]
 authors = [
     {name = "Fredrik Mellbin", email = "fredrik.mellbin@gmail.com"},    

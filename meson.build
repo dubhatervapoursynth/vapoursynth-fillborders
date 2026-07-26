@@ -1,6 +1,6 @@
 project('FillBorders', 'cpp',
     default_options: ['buildtype=release', 'warning_level=2', 'b_lto=true', 'b_ndebug=if-release', 'cpp_std=c++17'],
-    license: 'GPL-2.0',
+    license: 'WTFPL',
     license_files: 'LICENSE',
     meson_version: '>=1.2.3',
     version: '3.0',

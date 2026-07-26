@@ -26,28 +26,29 @@ mode
    "fixborders"
       A direction "aware" modification of FillMargins. It also works on all four sides.
 
-   "interlaced"
-      Fills the top and bottom borders only with pixels taken from the same field. Possible values are 1 (always on), 0 (always off), and -1 (uses the _FieldBased frame property to decide if interlaced processing should be used or not).
+interlaced
+   Fills the top and bottom borders only with pixels taken from the same field. Possible values are 1 (always on), 0 (always off), and -1 (uses the _FieldBased frame property to decide if interlaced processing should be used or not).
+
+On subsampled formats the borders are converted to chroma resolution by rounding up, so that a chroma sample overlapping any filled luma sample is filled too.
 
 
 Compilation
 ===========
 
-::
-
-   ./autogen.sh
-   ./configure
-   make
-
-or
+Requires VapourSynth to be installed and importable by the Python that Meson finds,
+because the include path is queried with ``vapoursynth.get_include()``.
 
 ::
 
-    meson build
+    meson setup build
     ninja -C build
+
+To build a wheel instead::
+
+    python -m build
 
 
 License
 =======
 
-The license is WTFPL.
+The license is WTFPL; see the LICENSE file.
