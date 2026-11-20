@@ -4,6 +4,18 @@ Description
 This is a simple filter that fills the borders of a clip, without changing the clip's dimensions.
 
 
+Installation
+============
+
+The plugin is published on PyPI as `vapoursynth-fillborders <https://pypi.org/project/vapoursynth-fillborders/>`_::
+
+    python -m pip install vapoursynth-fillborders
+
+Wheels are provided for Windows on x86-64, and for macOS and Linux on both x86-64 and arm64.
+
+The wheel places the plugin in the ``vapoursynth/plugins`` directory of the target Python environment, which VapourSynth autoloads, so no further setup is needed.
+
+
 Usage
 =====
 ::
@@ -28,6 +40,10 @@ mode
 
 interlaced
    Fills the top and bottom borders only with pixels taken from the same field. Possible values are 1 (always on), 0 (always off), and -1 (uses the _FieldBased frame property to decide if interlaced processing should be used or not).
+
+Supported formats are 8 to 16 bit integer, half precision float and single precision float.
+
+"repeat" and "mirror" only copy samples, so their output is always bit exact. "fillmargins" and "fixborders" average neighbouring samples; for both float formats that averaging is done in single precision.
 
 On subsampled formats the borders are converted to chroma resolution by rounding up, so that a chroma sample overlapping any filled luma sample is filled too.
 

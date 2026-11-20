@@ -24,6 +24,9 @@ enum InterlacedValues {
 };
 
 
+typedef void (*FillBordersFunction)(uint8_t *dstp, int width, int height, intptr_t stride, int left, int right, int top, int bottom, int mode, int interlaced);
+
+
 struct FillBordersData {
    VSNode *node;
    const VSVideoInfo *vi;
@@ -34,6 +37,8 @@ struct FillBordersData {
    int bottom;
    int mode;
    int interlaced;
+
+   FillBordersFunction fill;
 };
 
 // Rounded up, because a chroma sample covering any part of the filled luma area
@@ -43,19 +48,156 @@ static inline int64_t subsampledBorder(int64_t border, int subsampling) {
     return (border + (INT64_C(1) << subsampling) - 1) >> subsampling;
 }
 
-template <typename PixelType>
-static inline void vs_memset16(void *ptr, int value, size_t num) {
-    if (sizeof(PixelType) == 1)
-        memset(ptr, value, num);
-    else {
-        PixelType *tptr = (PixelType *)ptr;
-        while (num-- > 0)
-            *tptr++ = (PixelType)value;
+// IEEE 754 binary16. No portable native type exists for it, so samples are kept
+// as raw bits and converted to and from float around every computation. Fills
+// that only copy samples never look at the values and stay bit exact.
+struct Half {
+    uint16_t bits;
+};
+
+static_assert(sizeof(Half) == sizeof(uint16_t), "Half must occupy exactly one 16 bit sample.");
+
+static inline float halfToFloat(uint16_t h) {
+    const uint32_t sign = (uint32_t)(h & 0x8000) << 16;
+    int exponent = (h >> 10) & 0x1F;
+    uint32_t mantissa = h & 0x3FF;
+    uint32_t bits;
+
+    if (exponent == 0x1F) {
+        // Infinity or NaN. The payload is carried over so a NaN stays a NaN.
+        bits = sign | 0x7F800000 | (mantissa << 13);
+    } else if (exponent == 0) {
+        if (mantissa == 0) {
+            bits = sign;
+        } else {
+            // Subnormal half, normal float: shift the mantissa up until the
+            // implicit one appears and lower the exponent to match.
+            exponent = 1;
+            while (!(mantissa & 0x400)) {
+                mantissa <<= 1;
+                exponent--;
+            }
+            bits = sign | ((uint32_t)(exponent + (127 - 15)) << 23) | ((mantissa & 0x3FF) << 13);
+        }
+    } else {
+        bits = sign | ((uint32_t)(exponent + (127 - 15)) << 23) | (mantissa << 13);
     }
+
+    float value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static inline uint16_t floatToHalf(float value) {
+    uint32_t bits;
+    memcpy(&bits, &value, sizeof(bits));
+
+    const uint32_t sign = (bits >> 16) & 0x8000;
+    const int rawExponent = (bits >> 23) & 0xFF;
+    uint32_t mantissa = bits & 0x7FFFFF;
+
+    if (rawExponent == 0xFF) {
+        // Infinity or NaN. The payload is forced non-zero for a NaN so that
+        // dropping the low mantissa bits cannot turn it into an infinity.
+        return (uint16_t)(sign | 0x7C00 | (mantissa ? ((mantissa >> 13) | 0x200) : 0));
+    }
+
+    int exponent = rawExponent - 127 + 15;
+
+    // Too large for half, including every infinity produced by rounding below.
+    if (exponent >= 0x1F)
+        return (uint16_t)(sign | 0x7C00);
+
+    if (exponent <= 0) {
+        // Anything below half's smallest subnormal rounds to zero. This also
+        // covers zero itself and every float subnormal.
+        if (exponent < -10)
+            return (uint16_t)sign;
+
+        // Subnormal half: shift the mantissa, implicit one included, down into
+        // place and round to nearest, ties to even. Rounding up to 0x400 lands
+        // exactly on the smallest normal half, which is the intended result.
+        mantissa |= 0x800000;
+
+        const int shift = 14 - exponent;
+        const uint32_t result = mantissa >> shift;
+        const uint32_t dropped = mantissa & ((UINT32_C(1) << shift) - 1);
+        const uint32_t halfway = UINT32_C(1) << (shift - 1);
+
+        return (uint16_t)(sign | (result + (dropped > halfway || (dropped == halfway && (result & 1)))));
+    }
+
+    // Round to nearest, ties to even. A carry out of the mantissa bumps the
+    // exponent, which may in turn overflow to infinity.
+    uint32_t result = mantissa >> 13;
+    const uint32_t dropped = mantissa & 0x1FFF;
+
+    if (dropped > 0x1000 || (dropped == 0x1000 && (result & 1))) {
+        result++;
+
+        if (result == 0x400) {
+            result = 0;
+            exponent++;
+
+            if (exponent >= 0x1F)
+                return (uint16_t)(sign | 0x7C00);
+        }
+    }
+
+    return (uint16_t)(sign | ((uint32_t)exponent << 10) | result);
+}
+
+// How samples are read, written and averaged. Integer formats compute in int and
+// keep the original rounded division; float and half compute in float, where the
+// rounding offset would be wrong, and half additionally converts on access.
+template <typename PixelType>
+struct PixelTraits {
+    typedef int ArithType;
+
+    static inline ArithType load(PixelType p) { return (ArithType)p; }
+    static inline PixelType store(ArithType v) { return (PixelType)v; }
+    static inline ArithType avg(ArithType sum, int offset, int divisor) { return (sum + offset) / divisor; }
+};
+
+template <>
+struct PixelTraits<float> {
+    typedef float ArithType;
+
+    static inline float load(float p) { return p; }
+    static inline float store(float v) { return v; }
+    static inline float avg(float sum, [[maybe_unused]] int offset, int divisor) { return sum / divisor; }
+};
+
+template <>
+struct PixelTraits<Half> {
+    typedef float ArithType;
+
+    static inline float load(Half p) { return halfToFloat(p.bits); }
+    static inline Half store(float v) { Half h = { floatToHalf(v) }; return h; }
+    static inline float avg(float sum, [[maybe_unused]] int offset, int divisor) { return sum / divisor; }
+};
+
+template <typename T>
+static inline T absDiff(T a, T b) {
+    return a > b ? a - b : b - a;
+}
+
+template <typename PixelType>
+static inline void fillPixels(PixelType *ptr, PixelType value, size_t num) {
+    while (num-- > 0)
+        *ptr++ = value;
+}
+
+template <>
+inline void fillPixels<uint8_t>(uint8_t *ptr, uint8_t value, size_t num) {
+    memset(ptr, value, num);
 }
 
 template <typename PixelType>
 static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, int left, int right, int top, int bottom, int mode, int interlaced) {
+   typedef PixelTraits<PixelType> Pixel;
+   typedef typename Pixel::ArithType ArithType;
+
    int x, y;
    PixelType *dstp = (PixelType *)dstp8;
    stride /= sizeof(PixelType);
@@ -66,8 +208,8 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
    if (mode == ModeFillMargins) {
       for (y = top; y < height - bottom; y++) {
-         vs_memset16<PixelType>(dstp + stride*y, (dstp + stride*y)[left], left);
-         vs_memset16<PixelType>(dstp + stride*y + width - right, (dstp + stride*y + width - right)[-1], right);
+         fillPixels(dstp + stride*y, (dstp + stride*y)[left], left);
+         fillPixels(dstp + stride*y + width - right, (dstp + stride*y + width - right)[-1], right);
       }
 
       for (y = top - 1; y >= 0; y--) {
@@ -78,10 +220,10 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (x = 1; x < width - copyLen; x++) {
-            PixelType prev = dstp[stride*(y+1 + interlaced) + x - 1];
-            PixelType cur  = dstp[stride*(y+1 + interlaced) + x];
-            PixelType next = dstp[stride*(y+1 + interlaced) + x + 1];
-            dstp[stride*y + x] = (3*prev + 2*cur + 3*next + 4) / 8;
+            ArithType prev = Pixel::load(dstp[stride*(y+1 + interlaced) + x - 1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y+1 + interlaced) + x]);
+            ArithType next = Pixel::load(dstp[stride*(y+1 + interlaced) + x + 1]);
+            dstp[stride*y + x] = Pixel::store(Pixel::avg(3*prev + 2*cur + 3*next, 4, 8));
          }
       }
 
@@ -93,16 +235,16 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (x = 1; x < width - copyLen; x++) {
-            PixelType prev = dstp[stride*(y-1 - interlaced) + x - 1];
-            PixelType cur  = dstp[stride*(y-1 - interlaced) + x];
-            PixelType next = dstp[stride*(y-1 - interlaced) + x + 1];
-            dstp[stride*y + x] = (3*prev + 2*cur + 3*next + 4) / 8;
+            ArithType prev = Pixel::load(dstp[stride*(y-1 - interlaced) + x - 1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y-1 - interlaced) + x]);
+            ArithType next = Pixel::load(dstp[stride*(y-1 - interlaced) + x + 1]);
+            dstp[stride*y + x] = Pixel::store(Pixel::avg(3*prev + 2*cur + 3*next, 4, 8));
          }
       }
    } else if (mode == ModeRepeat) {
       for (y = top; y < height - bottom; y++) {
-         vs_memset16<PixelType>(dstp + stride*y, (dstp + stride*y)[left], left);
-         vs_memset16<PixelType>(dstp + stride*y + width - right, (dstp + stride*y + width - right)[-1], right);
+         fillPixels(dstp + stride*y, (dstp + stride*y)[left], left);
+         fillPixels(dstp + stride*y + width - right, (dstp + stride*y + width - right)[-1], right);
       }
 
       for (y = top - 1; y >= 0; y--) {
@@ -172,37 +314,37 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (y = top + 3; y < height - (bottom + 3); y++) {
-            PixelType prev = dstp[stride*(y - 1 - interlaced) +x+1];
-            PixelType cur  = dstp[stride*(y) +x+1];
-            PixelType next = dstp[stride*(y + 1 + interlaced) +x+1];
+            ArithType prev = Pixel::load(dstp[stride*(y - 1 - interlaced) +x+1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y) +x+1]);
+            ArithType next = Pixel::load(dstp[stride*(y + 1 + interlaced) +x+1]);
 
-            PixelType ref_prev = dstp[stride*(y - 1 - interlaced) +x+2];
-            PixelType ref_cur  = dstp[stride*(y) +x+2];
-            PixelType ref_next = dstp[stride*(y + 1 + interlaced) +x+2];
+            ArithType ref_prev = Pixel::load(dstp[stride*(y - 1 - interlaced) +x+2]);
+            ArithType ref_cur  = Pixel::load(dstp[stride*(y) +x+2]);
+            ArithType ref_next = Pixel::load(dstp[stride*(y + 1 + interlaced) +x+2]);
 
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
+	    ArithType fill_prev = Pixel::avg(5*prev + 3*cur + 1*next, 4, 9);
+	    ArithType fill_cur = Pixel::avg(1*prev + 3*cur + 1*next, 2, 5);
+	    ArithType fill_next = Pixel::avg(1*prev + 3*cur + 5*next, 4, 9);
 
-	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y - 2 - interlaced) + x+2]) / 4;
-	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y + 2 + interlaced) + x+2]) / 4;
+	    ArithType blur_prev = Pixel::avg(2 * ref_prev + ref_cur + Pixel::load(dstp[stride*(y - 2 - interlaced) + x+2]), 0, 4);
+	    ArithType blur_next = Pixel::avg(2 * ref_next + ref_cur + Pixel::load(dstp[stride*(y + 2 + interlaced) + x+2]), 0, 4);
 
-	    PixelType diff_next = abs(ref_next - fill_cur);
-	    PixelType diff_prev = abs(ref_prev - fill_cur);
-	    PixelType thr_next = abs(ref_next - blur_next);
-	    PixelType thr_prev = abs(ref_prev - blur_prev);
+	    ArithType diff_next = absDiff(ref_next, fill_cur);
+	    ArithType diff_prev = absDiff(ref_prev, fill_cur);
+	    ArithType thr_next = absDiff(ref_next, blur_next);
+	    ArithType thr_prev = absDiff(ref_prev, blur_prev);
 
 	    if (diff_next > thr_next) {
 		if (diff_prev < diff_next) {
-                    dstp[stride*y + x] = fill_prev;
+                    dstp[stride*y + x] = Pixel::store(fill_prev);
 		}
 		else {
-		    dstp[stride*y + x] = fill_next;
+		    dstp[stride*y + x] = Pixel::store(fill_next);
 		}
 	    } else if (diff_prev > thr_prev) {
-                dstp[stride*y + x] = fill_next;
+                dstp[stride*y + x] = Pixel::store(fill_next);
 	    } else {
-		dstp[stride*y + x] = fill_cur;
+		dstp[stride*y + x] = Pixel::store(fill_cur);
 	    }
          }
       }
@@ -219,37 +361,37 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (y = top + 3; y < height - (bottom + 3); y++) {
-            PixelType prev = dstp[stride*(y - 1 - interlaced) + x-1];
-            PixelType cur  = dstp[stride*(y) + x-1];
-            PixelType next = dstp[stride*(y + 1 + interlaced) + x-1];
+            ArithType prev = Pixel::load(dstp[stride*(y - 1 - interlaced) + x-1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y) + x-1]);
+            ArithType next = Pixel::load(dstp[stride*(y + 1 + interlaced) + x-1]);
 
-            PixelType ref_prev = dstp[stride*(y - 1 - interlaced) + x-2];
-            PixelType ref_cur  = dstp[stride*(y) + x-2];
-            PixelType ref_next = dstp[stride*(y + 1 + interlaced) + x-2];
+            ArithType ref_prev = Pixel::load(dstp[stride*(y - 1 - interlaced) + x-2]);
+            ArithType ref_cur  = Pixel::load(dstp[stride*(y) + x-2]);
+            ArithType ref_next = Pixel::load(dstp[stride*(y + 1 + interlaced) + x-2]);
 	    
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
+	    ArithType fill_prev = Pixel::avg(5*prev + 3*cur + 1*next, 4, 9);
+	    ArithType fill_cur = Pixel::avg(1*prev + 3*cur + 1*next, 2, 5);
+	    ArithType fill_next = Pixel::avg(1*prev + 3*cur + 5*next, 4, 9);
 
-	    PixelType blur_prev = (2 * ref_prev + ref_cur + dstp[stride*(y - 2 - interlaced) + x-2]) / 4;
-	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y + 2 + interlaced) + x-2]) / 4;
+	    ArithType blur_prev = Pixel::avg(2 * ref_prev + ref_cur + Pixel::load(dstp[stride*(y - 2 - interlaced) + x-2]), 0, 4);
+	    ArithType blur_next = Pixel::avg(2 * ref_next + ref_cur + Pixel::load(dstp[stride*(y + 2 + interlaced) + x-2]), 0, 4);
 
-	    PixelType diff_next = abs(ref_next - fill_cur);
-	    PixelType diff_prev = abs(ref_prev - fill_cur);
-	    PixelType thr_next = abs(ref_next - blur_next);
-	    PixelType thr_prev = abs(ref_prev - blur_prev);
+	    ArithType diff_next = absDiff(ref_next, fill_cur);
+	    ArithType diff_prev = absDiff(ref_prev, fill_cur);
+	    ArithType thr_next = absDiff(ref_next, blur_next);
+	    ArithType thr_prev = absDiff(ref_prev, blur_prev);
 
 	    if (diff_next > thr_next) {
 		if (diff_prev < diff_next) {
-                    dstp[stride*y + x] = fill_prev;
+                    dstp[stride*y + x] = Pixel::store(fill_prev);
 		}
 		else {
-		    dstp[stride*y + x] = fill_next;
+		    dstp[stride*y + x] = Pixel::store(fill_next);
 		}
 	    } else if (diff_prev > thr_prev) {
-                dstp[stride*y + x] = fill_next;
+                dstp[stride*y + x] = Pixel::store(fill_next);
 	    } else {
-		dstp[stride*y + x] = fill_cur;
+		dstp[stride*y + x] = Pixel::store(fill_cur);
 	    }
          }
       }
@@ -262,38 +404,38 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (x = 1; x < width - copyLen; x++) {
-            PixelType prev = dstp[stride*(y+1 + interlaced) + x - 1];
-            PixelType cur  = dstp[stride*(y+1 + interlaced) + x];
-            PixelType next = dstp[stride*(y+1 + interlaced) + x + 1];
+            ArithType prev = Pixel::load(dstp[stride*(y+1 + interlaced) + x - 1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y+1 + interlaced) + x]);
+            ArithType next = Pixel::load(dstp[stride*(y+1 + interlaced) + x + 1]);
 
-            PixelType ref_prev = dstp[stride*(y+2 + interlaced) + x - 1];
-            PixelType ref_cur  = dstp[stride*(y+2 + interlaced) + x];
-            PixelType ref_next = dstp[stride*(y+2 + interlaced) + x + 1];
-            PixelType ref_prev2 = dstp[stride*(y+2 + interlaced) + (x < 2 ? 0 : x - 2)];
+            ArithType ref_prev = Pixel::load(dstp[stride*(y+2 + interlaced) + x - 1]);
+            ArithType ref_cur  = Pixel::load(dstp[stride*(y+2 + interlaced) + x]);
+            ArithType ref_next = Pixel::load(dstp[stride*(y+2 + interlaced) + x + 1]);
+            ArithType ref_prev2 = Pixel::load(dstp[stride*(y+2 + interlaced) + (x < 2 ? 0 : x - 2)]);
 
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
+	    ArithType fill_prev = Pixel::avg(5*prev + 3*cur + 1*next, 4, 9);
+	    ArithType fill_cur = Pixel::avg(1*prev + 3*cur + 1*next, 2, 5);
+	    ArithType fill_next = Pixel::avg(1*prev + 3*cur + 5*next, 4, 9);
 
-	    PixelType blur_prev = (2 * ref_prev + ref_cur + ref_prev2) / 4;
-	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y+2 + interlaced) + x + 2]) / 4;
+	    ArithType blur_prev = Pixel::avg(2 * ref_prev + ref_cur + ref_prev2, 0, 4);
+	    ArithType blur_next = Pixel::avg(2 * ref_next + ref_cur + Pixel::load(dstp[stride*(y+2 + interlaced) + x + 2]), 0, 4);
 
-	    PixelType diff_next = abs(ref_next - fill_cur);
-	    PixelType diff_prev = abs(ref_prev - fill_cur);
-	    PixelType thr_next = abs(ref_next - blur_next);
-	    PixelType thr_prev = abs(ref_prev - blur_prev);
+	    ArithType diff_next = absDiff(ref_next, fill_cur);
+	    ArithType diff_prev = absDiff(ref_prev, fill_cur);
+	    ArithType thr_next = absDiff(ref_next, blur_next);
+	    ArithType thr_prev = absDiff(ref_prev, blur_prev);
 
 	    if (diff_next > thr_next) {
 		if (diff_prev < diff_next) {
-                    dstp[stride*y + x] = fill_prev;
+                    dstp[stride*y + x] = Pixel::store(fill_prev);
 		}
 		else {
-		    dstp[stride*y + x] = fill_next;
+		    dstp[stride*y + x] = Pixel::store(fill_next);
 		}
 	    } else if (diff_prev > thr_prev) {
-                dstp[stride*y + x] = fill_next;
+                dstp[stride*y + x] = Pixel::store(fill_next);
 	    } else {
-		dstp[stride*y + x] = fill_cur;
+		dstp[stride*y + x] = Pixel::store(fill_cur);
 	    }
          }
       }
@@ -306,38 +448,38 @@ static void fillBorders(uint8_t *dstp8, int width, int height, intptr_t stride, 
 
          // weighted average for the rest
          for (x = 1; x < width - copyLen; x++) {
-            PixelType prev = dstp[stride*(y-1 - interlaced) + x - 1];
-            PixelType cur  = dstp[stride*(y-1 - interlaced) + x];
-            PixelType next = dstp[stride*(y-1 - interlaced) + x + 1];
+            ArithType prev = Pixel::load(dstp[stride*(y-1 - interlaced) + x - 1]);
+            ArithType cur  = Pixel::load(dstp[stride*(y-1 - interlaced) + x]);
+            ArithType next = Pixel::load(dstp[stride*(y-1 - interlaced) + x + 1]);
 
-            PixelType ref_prev = dstp[stride*(y-2 - interlaced) + x - 1];
-            PixelType ref_cur  = dstp[stride*(y-2 - interlaced) + x];
-            PixelType ref_next = dstp[stride*(y-2 - interlaced) + x + 1];
-            PixelType ref_prev2 = dstp[stride*(y-2 - interlaced) + (x < 2 ? 0 : x - 2)];
+            ArithType ref_prev = Pixel::load(dstp[stride*(y-2 - interlaced) + x - 1]);
+            ArithType ref_cur  = Pixel::load(dstp[stride*(y-2 - interlaced) + x]);
+            ArithType ref_next = Pixel::load(dstp[stride*(y-2 - interlaced) + x + 1]);
+            ArithType ref_prev2 = Pixel::load(dstp[stride*(y-2 - interlaced) + (x < 2 ? 0 : x - 2)]);
 	    
-	    PixelType fill_prev = (5*prev + 3*cur + 1*next + 4) / 9;
-	    PixelType fill_cur = (1*prev + 3*cur + 1*next + 2) / 5;
-	    PixelType fill_next = (1*prev + 3*cur + 5*next + 4) / 9;
+	    ArithType fill_prev = Pixel::avg(5*prev + 3*cur + 1*next, 4, 9);
+	    ArithType fill_cur = Pixel::avg(1*prev + 3*cur + 1*next, 2, 5);
+	    ArithType fill_next = Pixel::avg(1*prev + 3*cur + 5*next, 4, 9);
 
-	    PixelType blur_prev = (2 * ref_prev + ref_cur + ref_prev2) / 4;
-	    PixelType blur_next = (2 * ref_next + ref_cur + dstp[stride*(y-2 - interlaced) + x + 2]) / 4;
+	    ArithType blur_prev = Pixel::avg(2 * ref_prev + ref_cur + ref_prev2, 0, 4);
+	    ArithType blur_next = Pixel::avg(2 * ref_next + ref_cur + Pixel::load(dstp[stride*(y-2 - interlaced) + x + 2]), 0, 4);
 
-	    PixelType diff_next = abs(ref_next - fill_cur);
-	    PixelType diff_prev = abs(ref_prev - fill_cur);
-	    PixelType thr_next = abs(ref_next - blur_next);
-	    PixelType thr_prev = abs(ref_prev - blur_prev);
+	    ArithType diff_next = absDiff(ref_next, fill_cur);
+	    ArithType diff_prev = absDiff(ref_prev, fill_cur);
+	    ArithType thr_next = absDiff(ref_next, blur_next);
+	    ArithType thr_prev = absDiff(ref_prev, blur_prev);
 
 	    if (diff_next > thr_next) {
 		if (diff_prev < diff_next) {
-                    dstp[stride*y + x] = fill_prev;
+                    dstp[stride*y + x] = Pixel::store(fill_prev);
 		}
 		else {
-		    dstp[stride*y + x] = fill_next;
+		    dstp[stride*y + x] = Pixel::store(fill_next);
 		}
 	    } else if (diff_prev > thr_prev) {
-                dstp[stride*y + x] = fill_next;
+                dstp[stride*y + x] = Pixel::store(fill_next);
 	    } else {
-		dstp[stride*y + x] = fill_cur;
+		dstp[stride*y + x] = Pixel::store(fill_cur);
 	    }
          }
       }
@@ -390,8 +532,7 @@ static const VSFrame *VS_CC fillBordersGetFrame(int n, int activationReason, voi
          int height = vsapi->getFrameHeight(dst, plane);
          intptr_t stride = vsapi->getStride(dst, plane);
 
-         (d->vi->format.bytesPerSample == 1 ? fillBorders<uint8_t>
-                                             : fillBorders<uint16_t>)(dstp, width, height, stride, left[!!plane], right[!!plane], top[!!plane], bottom[!!plane], d->mode, interlaced_processing);
+         d->fill(dstp, width, height, stride, left[!!plane], right[!!plane], top[!!plane], bottom[!!plane], d->mode, interlaced_processing);
       }
 
       return dst;
@@ -492,8 +633,26 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, [[maybe_unused]
    d->node = vsapi->mapGetNode(in, "clip", 0, nullptr);
    d->vi = vsapi->getVideoInfo(d->node);
 
-   if (!vsh::isConstantVideoFormat(d->vi) || d->vi->format.sampleType != stInteger || d->vi->format.bytesPerSample > 2) {
-      vsapi->mapSetError(out, "FillBorders: Only constant format 8..16 bit integer input supported.");
+   if (!vsh::isConstantVideoFormat(d->vi)) {
+      vsapi->mapSetError(out, "FillBorders: Only constant format input supported.");
+      vsapi->freeNode(d->node);
+      return;
+   }
+
+   // Picking the kernel here doubles as the format check. The only sample format
+   // the core knows that is left out is 32 bit integer.
+   const VSVideoFormat &format = d->vi->format;
+
+   if (format.sampleType == stInteger && format.bytesPerSample == 1)
+      d->fill = fillBorders<uint8_t>;
+   else if (format.sampleType == stInteger && format.bytesPerSample == 2)
+      d->fill = fillBorders<uint16_t>;
+   else if (format.sampleType == stFloat && format.bytesPerSample == 2)
+      d->fill = fillBorders<Half>;
+   else if (format.sampleType == stFloat && format.bytesPerSample == 4)
+      d->fill = fillBorders<float>;
+   else {
+      vsapi->mapSetError(out, "FillBorders: Only 8..16 bit integer, half precision float and single precision float input supported.");
       vsapi->freeNode(d->node);
       return;
    }
@@ -537,7 +696,7 @@ static void VS_CC fillBordersCreate(const VSMap *in, VSMap *out, [[maybe_unused]
 
 
 VS_EXTERNAL_API(void) VapourSynthPluginInit2(VSPlugin *plugin, const VSPLUGINAPI *vspapi) {
-   vspapi->configPlugin("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VS_MAKE_VERSION(4, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
+   vspapi->configPlugin("com.nodame.fillborders", "fb", "FillBorders plugin for VapourSynth", VS_MAKE_VERSION(5, 0), VAPOURSYNTH_API_VERSION, 0, plugin);
    vspapi->registerFunction("FillBorders",
                 "clip:vnode;"
                 "left:int:opt;"
